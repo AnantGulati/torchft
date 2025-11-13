@@ -45,6 +45,7 @@ from torchft.process_group import (
     ProcessGroupGloo,
 )
 
+device=torch.accelerator.current_accelerator()
 
 class FSDPTest(unittest.TestCase):
     @staticmethod
@@ -55,7 +56,7 @@ class FSDPTest(unittest.TestCase):
         dp_shard: int = 2,
         tp: int = 1,
     ) -> None:
-        torch.cuda.set_device(rank)
+        torch.accelerator.set_device(rank)
 
         group_size = world_size // dp_replicate
         group = rank // group_size
@@ -69,15 +70,15 @@ class FSDPTest(unittest.TestCase):
         manager = Mock(spec=Manager)
         manager._pg = ProcessGroupGloo()
         device_mesh = ft_init_device_mesh(
-            device_type="cuda",
+            device_type=device,
             mesh_shape=(dp_replicate, dp_shard, tp),
             mesh_dim_names=("dp_replicate", "dp_shard", "tp"),
             replicate_dim=0,
             manager=manager,
         )
         manager.num_participants.return_value = 1
-        model = nn.Linear(128, 128).cuda()
-        batch = torch.randn(4, 128).cuda()
+        model = nn.Linear(128, 128).to(device)
+        batch = torch.randn(4, 128).to(device)
 
         fsdp_mesh = device_mesh["dp_replicate", "dp_shard"]
 
@@ -92,7 +93,7 @@ class FSDPTest(unittest.TestCase):
         shard_model(batch).mean().backward()
 
     # pyre-ignore[56]: Pyre was not able to infer the type of argument
-    @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
+    @unittest.skipIf(torch.accelerator.device_count() < 4, "Not enough accelerators")
     def test_fsdp(self) -> None:
         context = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=4, mp_context=context) as executor:
@@ -105,7 +106,7 @@ class FSDPTest(unittest.TestCase):
                 fut.result()
 
     # pyre-ignore[56]: Pyre was not able to infer the type of argument
-    @unittest.skipIf(torch.cuda.device_count() < 4, "Not enough GPUs")
+    @unittest.skipIf(torch.accelerator.device_count() < 4, "Not enough accelerators")
     def test_fsdp_tp(self) -> None:
         context = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(max_workers=4, mp_context=context) as executor:

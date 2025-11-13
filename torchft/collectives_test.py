@@ -11,12 +11,13 @@ from unittest import skipUnless, TestCase
 import torch
 import torch.distributed as dist
 from parameterized import parameterized
-from torch import cuda
 from torch.distributed import ReduceOp, ReduceScatterOptions
 
 from torchft import _test_utils
 from torchft.process_group import ProcessGroup
 from torchft.process_group_test import MultiPgBaseTest
+
+device = torch.accelerator.current_accelerator()
 
 try:
     # pyre-ignore[21]: Could not find a module corresponding to import `triton`
@@ -44,8 +45,8 @@ else:
             raise AssertionError(f"Results not within tolerance {tolerance}")
 
     @skipUnless(
-        torch.cuda.is_available() and torch.cuda.device_count() >= 2,
-        "2 CUDA devices are required for this test",
+        torch.accelerator.is_available() and torch.accelerator.device_count() >= 2,
+        "2 accelerator devices are required for this test",
     )
     class QuantizedAllReduceTest(MultiPgBaseTest):
         BACKEND = "nccl"
@@ -57,8 +58,8 @@ else:
             futures = []
             for rank in range(self.WORLD_SIZE):
                 pg = self.pg_pool[rank]
-                device = f"cuda:{rank}"
-                fut = self.executor.submit(collective, pg, rank, device)
+                device_str = f"{device}:{rank}"
+                fut = self.executor.submit(collective, pg, rank, device_str)
                 futures.append(fut)
 
             self._collect(futures)
@@ -66,7 +67,7 @@ else:
         def _run_all_reduce_collective(
             self,
             pg: ProcessGroup,
-            device: str,
+            device_str: str,
             tensors_num: int,
             tensor_size: int,
             multiplier: float,
@@ -74,12 +75,12 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            torch.accelerator.set_device(device_str)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
                     dtype=dtype,
-                    device=device,
+                    device=device_str,
                 )
                 * multiplier
             )
@@ -105,7 +106,7 @@ else:
         def _run_reduce_scatter_collective(
             self,
             pg: ProcessGroup,
-            device: str,
+            device_str: str,
             tensors_num: int,
             tensor_size: int,
             multiplier: float,
@@ -113,12 +114,12 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            cuda.set_device(device)
+            torch.accelerator.set_device(device_str)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
                     dtype=dtype,
-                    device=device,
+                    device=device_str,
                 )
                 * multiplier
             )
@@ -147,13 +148,13 @@ else:
                 padded_sizes = get_padded_sizes(tensors, world_size)
                 padded_numel = sum(s.numel() for s in padded_sizes)
 
-                padded_input = torch.empty(padded_numel, dtype=dtype, device=device)
+                padded_input = torch.empty(padded_numel, dtype=dtype, device=device_str)
                 torch._chunk_cat(
                     tensors, dim=0, num_chunks=world_size, out=padded_input
                 )
 
                 expected_output = torch.empty(
-                    padded_numel // world_size, dtype=dtype, device=device
+                    padded_numel // world_size, dtype=dtype, device=device_str
                 )
 
                 work = pg.reduce_scatter([expected_output], [[padded_input]], opts)
@@ -178,9 +179,9 @@ else:
             dtype: torch.dtype,
         ) -> None:
             self._run_parallel_collectives(
-                lambda pg, _, device: self._run_all_reduce_collective(
+                lambda pg, _, device_str: self._run_all_reduce_collective(
                     pg,
-                    device,
+                    device_str,
                     2,
                     tensor_size,
                     multiplier,
@@ -199,9 +200,9 @@ else:
             dtype: torch.dtype,
         ) -> None:
             self._run_parallel_collectives(
-                lambda pg, _, device: self._run_reduce_scatter_collective(
+                lambda pg, _, device_str: self._run_reduce_scatter_collective(
                     pg,
-                    device,
+                    device_str,
                     2,
                     tensor_size,
                     multiplier,
