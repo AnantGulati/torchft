@@ -56,7 +56,7 @@ class FSDPTest(unittest.TestCase):
         dp_shard: int = 2,
         tp: int = 1,
     ) -> None:
-        torch.accelerator.set_device(rank)
+        torch.accelerator.set_device_index(rank)
 
         group_size = world_size // dp_replicate
         group = rank // group_size
@@ -70,7 +70,7 @@ class FSDPTest(unittest.TestCase):
         manager = Mock(spec=Manager)
         manager._pg = ProcessGroupGloo()
         device_mesh = ft_init_device_mesh(
-            device_type=device,
+            device_type=device.type,
             mesh_shape=(dp_replicate, dp_shard, tp),
             mesh_dim_names=("dp_replicate", "dp_shard", "tp"),
             replicate_dim=0,

@@ -14,7 +14,7 @@ from torchft import _test_utils
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
-DEVICE = torch.accelerator.current_accelerator.type()
+DEVICE = torch.accelerator.current_accelerator().type
 
 try:
     # pyre-fixme[21]: Could not find a module corresponding to import `triton`

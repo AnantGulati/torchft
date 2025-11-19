@@ -209,7 +209,7 @@ class Runner:
                     device_index = (
                         num_accelerators // self.num_replicas
                     ) * self.replica_id + rank
-                    device = torch.device(f"cuda:{device_index}")
+                    device = torch.device(f"{torch.accelerator.current_accelerator.type}:{device_index}")
                 else:
                     device = torch.device("cpu")
 
@@ -609,7 +609,7 @@ def all_reduce_callback(
     with ExitStack() as stack:
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
-        if device.type == "cuda":
+        if device.type == torch.accelerator.current_accelerator.type:
             pg = ProcessGroupBabyNCCL()
         else:
             pg = ProcessGroupGloo()

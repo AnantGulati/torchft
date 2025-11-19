@@ -11,7 +11,7 @@ from torchft.checkpointing.transport_test import (
     make_state_dict,
     run_multi_recovery_test,
 )
-from torchft.process_group import ProcessGroupBabyNCCL, ProcessGroupGloo
+from torchft.process_group import ProcessGroupBabyXCCL, ProcessGroupGloo
 
 
 class PGTransportTest(TestCase):
@@ -39,7 +39,7 @@ class PGTransportTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.device_count() >= 3, "need three accelerator")
-    def test_pg_transport_baby_nccl(self) -> None:
+    def test_pg_transport_baby_xccl(self) -> None:
         store: TCPStore = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -49,7 +49,7 @@ class PGTransportTest(TestCase):
         def init(rank: int, world_size: int) -> CheckpointTransport[dict[str, object]]:
             torch.accelerator.set_device(rank)
 
-            pg = ProcessGroupBabyNCCL(timeout=timeout)
+            pg = ProcessGroupBabyXCCL(timeout=timeout)
             pg.configure(
                 store_addr=f"localhost:{store.port}/prefix",
                 rank=rank,
@@ -62,7 +62,7 @@ class PGTransportTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.device_count() >= 3, "need three accelerator")
-    def test_pg_transport_baby_nccl_inplace(self) -> None:
+    def test_pg_transport_baby_xccl_inplace(self) -> None:
         store: TCPStore = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -75,7 +75,7 @@ class PGTransportTest(TestCase):
         def init(rank: int, world_size: int) -> CheckpointTransport[dict[str, object]]:
             torch.accelerator.set_device(rank)
 
-            pg = ProcessGroupBabyNCCL(timeout=timeout)
+            pg = ProcessGroupBabyXCCL(timeout=timeout)
             pg.configure(
                 store_addr=f"localhost:{store.port}/prefix",
                 rank=rank,

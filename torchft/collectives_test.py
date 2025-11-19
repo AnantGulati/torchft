@@ -49,7 +49,7 @@ else:
         "2 accelerator devices are required for this test",
     )
     class QuantizedAllReduceTest(MultiPgBaseTest):
-        BACKEND = "nccl"
+        BACKEND = torch.distributed.get_default_backend_for_device(device)
         WORLD_SIZE = 2
 
         def _run_parallel_collectives(

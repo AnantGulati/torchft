@@ -147,7 +147,7 @@ class DiLoCoTrainer:
         return outer_optimizers
 
     def setup_pg(self) -> FakeProcessGroupWrapper:
-        if self.device.type == "cuda":
+        if self.device.type == torch.accelerator.current_accelerator.type:
             return FakeProcessGroupWrapper(ProcessGroupBabyNCCL())
         else:
             return FakeProcessGroupWrapper(
