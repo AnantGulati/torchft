@@ -43,11 +43,11 @@ class PGTransportTest(TestCase):
         store: TCPStore = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
-        device: torch.device = torch.device.accelerator.current_accelerator()
+        device: torch.device = torch.accelerator.current_accelerator()
         timeout: timedelta = timedelta(seconds=10)
 
         def init(rank: int, world_size: int) -> CheckpointTransport[dict[str, object]]:
-            torch.accelerator.set_device(rank)
+            torch.accelerator.set_device_index(rank)
 
             pg = ProcessGroupBabyXCCL(timeout=timeout)
             pg.configure(
@@ -66,7 +66,7 @@ class PGTransportTest(TestCase):
         store: TCPStore = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
-        device: torch.device = torch.device.accelerator.current_accelerator()
+        device: torch.device = torch.accelerator.current_accelerator()
         timeout: timedelta = timedelta(seconds=10)
 
         def state_dict() -> dict[str, object]:

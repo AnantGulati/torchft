@@ -75,7 +75,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            torch.accelerator.set_device(device_str)
+            torch.accelerator.current_accelerator().set_device(device_str)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
@@ -114,7 +114,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            torch.accelerator.set_device(device_str)
+            torch.xpu.set_device(device_str)
             inp = (
                 torch.rand(
                     tensors_num * tensor_size,
