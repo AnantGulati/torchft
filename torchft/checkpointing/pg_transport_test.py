@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import sys
 from datetime import timedelta
 from unittest import skipIf, skipUnless, TestCase
@@ -27,6 +33,7 @@ class PGTransportTest(TestCase):
             pg = ProcessGroupGloo()
             pg.configure(
                 store_addr=f"localhost:{store.port}/prefix",
+                replica_id="0",
                 rank=rank,
                 world_size=world_size,
             )
@@ -52,6 +59,7 @@ class PGTransportTest(TestCase):
             pg = ProcessGroupBabyXCCL(timeout=timeout)
             pg.configure(
                 store_addr=f"localhost:{store.port}/prefix",
+                replica_id="0",
                 rank=rank,
                 world_size=world_size,
             )
@@ -78,6 +86,7 @@ class PGTransportTest(TestCase):
             pg = ProcessGroupBabyXCCL(timeout=timeout)
             pg.configure(
                 store_addr=f"localhost:{store.port}/prefix",
+                replica_id="0",
                 rank=rank,
                 world_size=world_size,
             )

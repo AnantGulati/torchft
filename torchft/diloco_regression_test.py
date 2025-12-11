@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import argparse
 import copy
 import json
@@ -18,7 +24,6 @@ from torch import nn, optim
 
 from torchft._test.diloco_trainer import DiLoCoTrainer, MultiModel
 from torchft._torchft import LighthouseServer
-from torchft.device_mesh import ft_init_device_mesh
 from torchft.local_sgd import DiLoCo
 from torchft.manager import Manager
 from torchft.manager_integ_test import EventInjector, EventInjectorEvent, Runner

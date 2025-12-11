@@ -8,42 +8,18 @@ import multiprocessing
 import os
 import unittest
 from concurrent.futures import ProcessPoolExecutor
-from typing import Any, Dict, Tuple
 from unittest.mock import Mock
 
 import torch
 import torch.distributed as dist
 from torch import nn
-from torch._C._distributed_c10d import (
-    _resolve_process_group,
-    AllgatherOptions,
-    AllreduceOptions,
-    BroadcastOptions,
-    ReduceOp,
-)
-from torch.distributed import (
-    _functional_collectives,
-    get_world_size,
-    ReduceOp,
-    TCPStore,
-    Work,
-)
-from torch.distributed._composable.fsdp import fully_shard
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    RowwiseParallel,
-    SequenceParallel,
-)
+from torch._C._distributed_c10d import ReduceOp
+from torch.distributed._composable.fsdp import FSDPModule, fully_shard
+from torch.distributed.tensor import init_device_mesh
+from torch.distributed.tensor.parallel import ColwiseParallel, parallelize_module
 
 from torchft.manager import Manager
-from torchft.process_group import (
-    ft_init_device_mesh,
-    ManagedProcessGroup,
-    ProcessGroupGloo,
-)
+from torchft.process_group import ProcessGroupGloo
 
 device=torch.accelerator.current_accelerator()
 
@@ -67,20 +43,25 @@ class FSDPTest(unittest.TestCase):
         os.environ["RANK"] = str(group_rank)
         os.environ["WORLD_SIZE"] = str(group_size)
 
-        manager = Mock(spec=Manager)
-        manager._pg = ProcessGroupGloo()
-        device_mesh = ft_init_device_mesh(
-            device_type=device.type,
-            mesh_shape=(dp_replicate, dp_shard, tp),
-            mesh_dim_names=("dp_replicate", "dp_shard", "tp"),
-            replicate_dim=0,
-            manager=manager,
+        pg: ProcessGroupGloo = Mock(spec=ProcessGroupGloo)
+        device_mesh = init_device_mesh(
+            device_type="cuda",
+            mesh_shape=(dp_shard, tp),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
         )
         manager.num_participants.return_value = 1
         model = nn.Linear(128, 128).to(device)
         batch = torch.randn(4, 128).to(device)
 
-        fsdp_mesh = device_mesh["dp_replicate", "dp_shard"]
+        fsdp_mesh = device_mesh["dp_shard"]
+
+        def all_reduce_hook(output: torch.Tensor) -> None:
+            dist.all_reduce(output, group=pg, op=ReduceOp.AVG)
+
+        def apply_set_all_reduce_hook(m: nn.Module) -> None:
+            assert isinstance(m, FSDPModule)
+            m.set_all_reduce_hook(all_reduce_hook)
 
         if tp > 1:
             tp_mesh = device_mesh["tp"]
@@ -90,6 +71,7 @@ class FSDPTest(unittest.TestCase):
                 ColwiseParallel(),
             )
         shard_model = fully_shard(model, mesh=fsdp_mesh)
+        shard_model.apply(apply_set_all_reduce_hook)
         shard_model(batch).mean().backward()
 
     # pyre-ignore[56]: Pyre was not able to infer the type of argument

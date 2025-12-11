@@ -34,14 +34,10 @@ from torch.distributed import (
     ReduceOp,
     TCPStore,
 )
-from torch.distributed.device_mesh import init_device_mesh
-
 from torchft.manager import Manager
 from torchft.process_group import (
     _ErrorSwallowingWork,
     ErrorSwallowingProcessGroupWrapper,
-    extend_device_mesh,
-    ft_init_device_mesh,
     ManagedProcessGroup,
     ProcessGroup,
     ProcessGroupBabyGloo,
@@ -510,7 +506,7 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
         pg = ProcessGroupGloo()
-        pg.configure(store_addr, 0, 1)
+        pg.configure(store_addr, "0", 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
@@ -542,7 +538,7 @@ class ProcessGroupTest(TestCase):
         with self.assertRaisesRegex(
             RuntimeError, "(timeout after 10ms|Socket Timeout)"
         ):
-            pg.configure(store_addr, 0, 2)
+            pg.configure(store_addr, "0", 0, 2)
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.is_available(), "needs accelerator")
@@ -552,9 +548,9 @@ class ProcessGroupTest(TestCase):
         )
         device = torch.accelerator.current_accelerator().type
 
-        store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupXCCL()
-        pg.configure(store_addr, 0, 1)
+    store_addr = f"localhost:{store.port}/prefix"
+    pg = ProcessGroupNCCL()
+    pg.configure(store_addr, "0", 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
@@ -566,7 +562,7 @@ class ProcessGroupTest(TestCase):
 
         # reconfigure
         store_addr = f"localhost:{store.port}/prefix2"
-        pg.configure(store_addr, 0, 1)
+        pg.configure(store_addr, "0", 0, 1)
 
         _test_pg(pg, torch.tensor([2], device=device))
 
@@ -587,9 +583,9 @@ class ProcessGroupTest(TestCase):
         )
         device = torch.accelerator.current_accelerator().type
 
-        store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupXCCL()
-        pg.configure(store_addr, 0, 1)
+    store_addr = f"localhost:{store.port}/prefix"
+    pg = ProcessGroupNCCL()
+    pg.configure(store_addr, "0", 0, 1)
 
         t = torch.tensor([2], device=device)
         pg.allreduce([t], ReduceOp.SUM).wait()
@@ -615,7 +611,7 @@ class ProcessGroupTest(TestCase):
         pg = ProcessGroupXCCL(timeout=timedelta(seconds=0.01))
 
         with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
-            pg.configure(store_addr, 0, 2)
+            pg.configure(store_addr, "0", 0, 2)
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -626,7 +622,7 @@ class ProcessGroupTest(TestCase):
 
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=0.01))
         with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
-            a.configure(store_addr, 0, 2)
+            a.configure(store_addr, "0", 0, 2)
 
     def test_reconfigure_baby_process_group(self) -> None:
         store = TCPStore(
@@ -635,13 +631,13 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         a = ProcessGroupBabyGloo()
-        a.configure(store_addr, 0, 1)
+        a.configure(store_addr, "0", 0, 1)
         future_thread_1 = a._future_thread
         future_pipe_1 = a._future_pipe
         p_1 = a._p
 
         store_addr = f"localhost:{store.port}/prefix2"
-        a.configure(store_addr, 0, 1)
+        a.configure(store_addr, "0", 0, 1)
         future_thread_2 = a._future_thread
         future_pipe_2 = a._future_pipe
         p_2 = a._p
@@ -673,7 +669,7 @@ class ProcessGroupTest(TestCase):
 
         a = ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
         try:
-            a.configure(store_addr, 0, 1)
+            a.configure(store_addr, "0", 0, 1)
 
             _test_pg(a)
 
@@ -704,7 +700,7 @@ class ProcessGroupTest(TestCase):
 
         a = ProcessGroupBabyXCCL(timeout=timedelta(seconds=10))
         try:
-            a.configure(store_addr, 0, 1)
+            a.configure(store_addr, "0", 0, 1)
 
             _test_pg(a, torch.randn((2, 3), device=torch.accelerator.current_accelerator().type))
 
@@ -729,29 +725,6 @@ class ProcessGroupTest(TestCase):
         m = torch.nn.parallel.DistributedDataParallel(m, process_group=pg)
         m(torch.rand(2, 3))
 
-    def test_device_mesh(self) -> None:
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = str(0)
-        os.environ["RANK"] = str(0)
-        os.environ["WORLD_SIZE"] = str(1)
-
-        mesh_1d = init_device_mesh("cpu", mesh_shape=(1,), mesh_dim_names=("tp",))
-
-        store = TCPStore(
-            host_name="localhost", port=0, is_master=True, wait_for_workers=False
-        )
-        store_addr = f"localhost:{store.port}/prefix"
-
-        pg = ProcessGroupGloo()
-        pg.register("test_device_mesh")
-        pg.configure(store_addr, 0, 1)
-
-        mesh_2d = extend_device_mesh(mesh_1d, pg)
-        mesh_2d.get_group("dp")
-        assert mesh_2d.ndim == 2
-
-        pg.unregister()
-
     def test_functional_collectives(self) -> None:
         dummy_init_pg()
 
@@ -761,7 +734,7 @@ class ProcessGroupTest(TestCase):
         store_addr = f"localhost:{store.port}/prefix"
 
         pg = ProcessGroupGloo().register("test_func_col")
-        pg.configure(store_addr, 0, 1)
+        pg.configure(store_addr, "0", 0, 1)
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
@@ -778,7 +751,7 @@ class ProcessGroupTest(TestCase):
         wrapper = ProcessGroupWrapper(pg=pg)
         self.assertIs(wrapper.parent, pg)
 
-        wrapper.configure("addr", 0, 1)
+        wrapper.configure("addr", "0", 0, 1)
         self.assertEqual(pg.configure_count, 1)
 
         self.assertEqual(repr(wrapper), "ProcessGroupWrapper(pg=ProcessGroupDummy())")
@@ -813,53 +786,6 @@ class ProcessGroupTest(TestCase):
         self.assertEqual(manager.allreduce.call_count, 2)
 
 
-class DeviceMeshTest(TestCase):
-    @staticmethod
-    def _test_init_device_mesh(world_size: int, rank: int) -> None:
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = str(12346)
-        os.environ["RANK"] = str(rank)
-        os.environ["WORLD_SIZE"] = str(4)
-
-        testcase = TestCase()
-
-        manager = Mock(spec=Manager)
-        # Even though we only have 4 workers, we can still initialize (2, 4) mesh.
-        # That's because the replicate group is NOT phystically created in the
-        # real mesh but is virtually added to the mesh via ManagedDeviceMesh.
-        device_mesh = ft_init_device_mesh(
-            device_type="cpu",
-            mesh_shape=(2, world_size),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
-            replicate_dim=0,
-            manager=manager,
-        )
-
-        testcase.assertTrue(
-            isinstance(device_mesh.get_group("dp_replicate"), ManagedProcessGroup)
-        )
-        testcase.assertTrue(
-            not isinstance(device_mesh.get_group("dp_shard"), ManagedProcessGroup)
-        )
-        replicate_group = device_mesh.get_group("dp_replicate")
-        testcase.assertEqual(
-            cast(ManagedProcessGroup, replicate_group)._manager, manager
-        )
-        replicate_mesh = device_mesh["dp_replicate"]
-        testcase.assertEqual(replicate_mesh.get_group(), replicate_group)
-        flatten_mesh = device_mesh._flatten("dp")
-        manager.num_participants.return_value = 1
-        testcase.assertEqual(flatten_mesh.size(), world_size)
-        testcase.assertEqual(flatten_mesh.get_local_rank(), dist.get_rank())
-
-    def test_init_device_mesh(self) -> None:
-        with ProcessPoolExecutor(max_workers=4) as executor:
-            futures = []
-            for i in range(4):
-                future = executor.submit(self._test_init_device_mesh, 4, i)
-                futures.append(future)
-
-
 class MultiPgBaseTest(TestCase):
     """
     A base test that creates N processes (via ThreadPoolExecutor) sharing
@@ -891,7 +817,7 @@ class MultiPgBaseTest(TestCase):
             if torch.accelerator.is_available():
                 torch.accelerator.set_device_idx(rank)
             pg = cls._create_pg(cls.BACKEND)
-            pg.configure(cls.store_addr, rank, cls.WORLD_SIZE)
+            pg.configure(cls.store_addr, "0", rank, cls.WORLD_SIZE)
             return pg
 
         futures = [cls.executor.submit(init_pg, rank) for rank in range(cls.WORLD_SIZE)]
@@ -980,7 +906,7 @@ class MultiPgBaseTest(TestCase):
             # Re-configure the PG to exclude the fault rank
             new_store_addr = f"localhost:{self.store.port}/reconfig_{collective}"
 
-            pg.configure(new_store_addr, rank, self.WORLD_SIZE)
+            pg.configure(new_store_addr, "0", rank, self.WORLD_SIZE)
 
             # run the same collective again successfully
             t2 = torch.tensor([rank + 1], device=dev)

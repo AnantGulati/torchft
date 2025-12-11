@@ -45,7 +45,6 @@ import torch.multiprocessing as mp
 
 # pyre-fixme[21]: no attribute ProcessGroupGloo
 from torch.distributed import (
-    DeviceMesh,
     PrefixStore,
     ProcessGroup as BaseProcessGroup,
     ProcessGroupGloo as BaseProcessGroupGloo,
@@ -67,7 +66,6 @@ from torch.futures import Future
 from torch.utils._pytree import tree_any
 
 # We import these for backwards compatibility
-from torchft.device_mesh import *  # noqa: F401
 from torchft.futures import context_timeout, stream_timeout
 from torchft.multiprocessing import _MonitoredPipe
 from torchft.utils import get_stream_context, record_event, synchronize
@@ -277,7 +275,17 @@ class ProcessGroup(BaseProcessGroup):
         """
         raise NotImplementedError("not implemented")
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         """
         This reconfigures the ProcessGroup to use a new store, rank and world size.
 
@@ -289,8 +297,13 @@ class ProcessGroup(BaseProcessGroup):
 
         Args:
             store_addr: address of the store to use
+            replica_id: the replica_id for this group
             rank: rank of this process
             world_size: world size of this process group
+            quorum_id: current quorum's identifier
+            group_rank: local rank within the replica group
+            group_world_size: the number of ranks within a replica
+            global_ranks: the global ranks part of this process group
         """
         raise NotImplementedError("not implemented")
 
@@ -403,6 +416,14 @@ class ProcessGroupWrapper(ProcessGroup):
         super().__init__(0, 1)
         self._pg: Optional[BaseProcessGroup] = pg
         self._timeout = timeout
+        self._replica_id: str | None = None
+        self._rank: int | None = None
+        self._quorum_id: int | None = None
+        self._group_rank: int | None = None
+        self._group_world_size: int | None = None
+        self._global_ranks: list[int] | None = None
+
+        self.errors_logger: logging.Logger = logging.getLogger("torchft_errors")
 
     def getBackendName(self) -> str:
         pg = self._pg
@@ -411,20 +432,56 @@ class ProcessGroupWrapper(ProcessGroup):
 
         raise NotImplementedError("not implemented")
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         pg = self._pg
+        self._replica_id = replica_id
+        self._quorum_id = quorum_id
+        self._group_rank = group_rank
+        self._group_world_size = group_world_size
+        self._rank = rank
+        self._global_ranks = global_ranks
         if isinstance(pg, ProcessGroup):
-            pg.configure(store_addr, rank, world_size)
+            pg.configure(
+                store_addr,
+                replica_id,
+                rank,
+                world_size,
+                quorum_id,
+                group_rank,
+                group_world_size,
+                global_ranks,
+            )
             return
 
         # abort if already initialized
-        self.abort()
+        self.abort(errored=False)
 
         store = create_store_client(store_addr, timeout=self._timeout)
 
         self._pg = self._create_pg(store, rank, world_size)
 
-    def abort(self) -> None:
+    def abort(self, errored: bool = True) -> None:
+        if errored:
+            self.errors_logger.info(
+                "",
+                extra={
+                    "job_id": os.environ.get("JOB_ID", "unknown"),
+                    "replica_id": self._replica_id,
+                    "rank": self._rank,
+                    "quorum_id": self._quorum_id,
+                    "error": "process_group_abort",
+                },
+            )
         pg = self._pg
         if pg is not None:
             if hasattr(pg, "abort"):
@@ -594,6 +651,12 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         # pyre-fixme[16]: no attribute ProcessGroupGloo
         backend_class = BaseProcessGroupGloo(store, rank, world_size, self._timeout)
         backend_class._set_sequence_number_for_group()
+
+        if self._global_ranks:
+            backend_class.options.global_ranks_in_group = self._global_ranks
+        if self._group_rank and self._group_world_size:
+            backend_class.options.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
+
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
@@ -791,6 +854,10 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         opts = BaseProcessGroupNCCL.Options()
         opts.config.blocking = False
+        if self._global_ranks:
+            opts.global_ranks_in_group = self._global_ranks
+        if self._group_rank and self._group_world_size:
+            opts.group_name = f"torchft_quorum_{self._quorum_id}_rank_{self._group_rank % self._group_world_size}"
 
         pg = BaseProcessGroup(store, rank, world_size)
         pg._set_default_backend(ProcessGroup.BackendType.NCCL)
@@ -805,7 +872,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         )
         return pg
 
-    def abort(self) -> None:
+    def abort(self, errored: bool = True) -> None:
         # We need to set the error before aborting to ensure that errored()
         # returns the error correctly when NCCL abort fires and unblocks the
         # stream.
@@ -813,7 +880,7 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
             trigger_nccl_fr_trace_through_pipe(dist.get_rank())
         self._errored = RuntimeError("aborted")
 
-        super().abort()
+        super().abort(errored=errored)
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
@@ -917,13 +984,13 @@ class ProcessGroupXCCL(ProcessGroupWrapper):
         )
         return pg
 
-    def abort(self) -> None:
+    def abort(self, errored: bool = True) -> None:
         # We need to set the error before aborting to ensure that errored()
         # returns the error correctly when XCCL abort fires and unblocks the
         # stream.
         self._errored = RuntimeError("aborted")
 
-        super().abort()
+        super().abort(errored)
 
     def errored(self) -> Optional[Exception]:
         # force a synchronization to ensure all work is complete
@@ -956,7 +1023,17 @@ class ProcessGroupDummy(ProcessGroup):
         self._work: List[Work] = []
         self.configure_count = 0
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         self.configure_count += 1
 
     def allgather(
@@ -1113,10 +1190,29 @@ class ErrorSwallowingProcessGroupWrapper(ProcessGroupWrapper):
 
         self._error: Optional[Exception] = None
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         self._error = None
 
-        super().configure(store_addr, rank, world_size)
+        super().configure(
+            store_addr,
+            replica_id,
+            rank,
+            world_size,
+            quorum_id,
+            group_rank,
+            group_world_size,
+            global_ranks,
+        )
 
     def report_error(self, e: Exception) -> None:
         """
@@ -1167,10 +1263,29 @@ class FakeProcessGroupWrapper(ProcessGroupWrapper):
 
         self._future_error: Optional[Exception] = None
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         self._future_error = None
 
-        super().configure(store_addr, rank, world_size)
+        super().configure(
+            store_addr,
+            replica_id,
+            rank,
+            world_size,
+            quorum_id,
+            group_rank,
+            group_world_size,
+            global_ranks,
+        )
 
     def report_future_error(self, e: Exception) -> None:
         """
@@ -1383,7 +1498,17 @@ class ProcessGroupBaby(ProcessGroup):
         if self._p is not None:
             self._p.kill()
 
-    def configure(self, store_addr: str, rank: int, world_size: int) -> None:
+    def configure(
+        self,
+        store_addr: str,
+        replica_id: str,
+        rank: int,
+        world_size: int,
+        quorum_id: Optional[int] = None,
+        group_rank: Optional[int] = None,
+        group_world_size: Optional[int] = None,
+        global_ranks: Optional[list[int]] = None,
+    ) -> None:
         self._world_size = world_size
 
         self.shutdown()

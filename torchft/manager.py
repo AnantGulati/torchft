@@ -88,6 +88,8 @@ CONNECT_TIMEOUT_SEC_ENV: str = "TORCHFT_CONNECT_TIMEOUT_SEC"
 # crash if call to quorum fails, all replicas will crash.
 QUORUM_RETRIES_ENV: str = "TORCHFT_QUORUM_RETRIES"
 
+TORCH_FR_DUMP_TEMP_FILE_ENV: str = "TORCH_FR_DUMP_TEMP_FILE"
+
 T = TypeVar("T")
 
 
@@ -107,6 +109,17 @@ def get_timeout(
         return timedelta(seconds=int(timeout_sec_env))
 
     return default_timeout_sec
+
+
+def extract_trailing_digits(s: str) -> int:
+    """
+    Extracts the trailing digits from the end of the string s.
+    Returns an empty string if no trailing digits are found.
+    """
+    i = len(s) - 1
+    while i >= 0 and s[i].isdigit():
+        i -= 1
+    return int(s[i + 1 :]) if i < len(s) - 1 else 0
 
 
 class WorldSizeMode(Enum):
@@ -216,8 +229,17 @@ class Manager:
                 before raising an exception. If None, will retry indefinitely.
             quorum_retries: the number of times to retry the quorum before crashing
         """
+        self.quorum_logger: logging.Logger = logging.getLogger("torchft_quorums")
+        self.commits_logger: logging.Logger = logging.getLogger("torchft_commits")
+        self.errors_logger: logging.Logger = logging.getLogger("torchft_errors")
+
         self._load_state_dict_fns: Dict[str, Callable[[object], None]] = {}
         self._user_state_dicts: Dict[str, Callable[[], object]] = {}
+
+        self._original_fr_dump_temp_file: Optional[str] = os.environ.get(
+            TORCH_FR_DUMP_TEMP_FILE_ENV
+        )
+        self._replica_id = replica_id
 
         # Protects state dict
         self._state_dict_lock = RWLock(timeout=timeout.total_seconds())
@@ -251,7 +273,7 @@ class Manager:
         store_port = store_port or int(os.environ["MASTER_PORT"])
         self._group_rank: int = rank if rank is not None else int(os.environ["RANK"])
         group_rank = self._group_rank
-        group_world_size = world_size or int(os.environ["WORLD_SIZE"])
+        self._group_world_size: int = world_size or int(os.environ["WORLD_SIZE"])
         self._min_replica_size = min_replica_size
 
         if checkpoint_transport is None:
@@ -304,7 +326,7 @@ class Manager:
                 hostname=hostname,
                 bind=bind,
                 store_addr=f"{store_addr}:{store_port}",
-                world_size=group_world_size,
+                world_size=self._group_world_size,
                 heartbeat_interval=heartbeat_interval,
                 connect_timeout=connect_timeout,
                 quorum_retries=self._quorum_retries,
@@ -331,6 +353,17 @@ class Manager:
         self._participating_replica_rank: Optional[int] = None
         self._participating_replica_world_size: int = 0
         self._is_state_dict_read_allowed = True
+
+        self._global_rank: int = (
+            self._group_rank
+            if self._replica_id is None
+            else (
+                extract_trailing_digits(self._replica_id) * self._group_world_size
+                + self._group_rank
+            )
+        )
+
+        self._update_fr_path()
 
     def allow_state_dict_read(self) -> None:
         if self._is_state_dict_read_allowed:
@@ -381,7 +414,7 @@ class Manager:
         self,
         tensor: torch.Tensor,
         should_quantize: bool = False,
-        reduce_op: ReduceOp = ReduceOp.SUM,
+        reduce_op: ReduceOp = ReduceOp.AVG,
     ) -> Work:
         """
         Fault tolerant allreduce the tensor and return a Future that will be completed when
@@ -410,6 +443,15 @@ class Manager:
         if not self.is_participating():
             tensor.zero_()
 
+        # special logic for average
+        pg_reduce_op = reduce_op
+        if reduce_op == ReduceOp.AVG:
+            if not torch.is_floating_point(tensor):
+                raise ValueError(
+                    "average reduce op is only supported for floating point tensors"
+                )
+            pg_reduce_op = ReduceOp.SUM
+
         # TODO: increase timeout when waiting when healing
         try:
             # Run the allreduce async and save the work object so we can wait on
@@ -417,27 +459,30 @@ class Manager:
             if should_quantize and IS_TRITON_AVAILABLE:
                 work = allreduce_quantized(
                     [tensor],
-                    reduce_op,
+                    pg_reduce_op,
                     self._pg,
                     # pyre-fixme[6]: Expected `Optional[streams.Stream]` but got `_C.Stream`
                     torch.accelerator.current_stream(),
                 )
             else:
-                work = self._pg.allreduce([tensor], reduce_op)
+                opts = AllreduceOptions()
+                opts.reduceOp = pg_reduce_op
+                work = self._pg.allreduce([tensor], opts)
 
             # schedule grad normalization as a continuation
             # on the Future
             @torch.profiler.record_function("torchft::manager::allreduce::callback")
             def callback(
-                fut: torch.futures.Future[list[torch.Tensor]],
+                fut: torch.futures.Future[torch.Tensor],
             ) -> torch.Tensor:
                 nonlocal tensor
-                if reduce_op == ReduceOp.SUM:
+                if reduce_op == ReduceOp.AVG:
                     tensor /= num_participants
                 return tensor
 
             managed_work = _ManagedWork(self, work, tensor)
             fut = managed_work.get_future()
+            fut = cast(torch.futures.Future[torch.Tensor], fut)
             fut = fut.then(callback)
             return managed_work
 
@@ -617,6 +662,13 @@ class Manager:
         max_replica_rank = quorum.max_replica_rank
         max_replica_world_size = quorum.max_world_size
         heal = quorum.heal
+        replica_ids = quorum.replica_ids
+
+        ranks_in_quorum = [
+            extract_trailing_digits(replica_id.split(":")[0]) * self._group_world_size
+            + self._group_rank
+            for replica_id in replica_ids
+        ]
 
         # When using async quorum we need to take the recovered workers.
         # When not using async quorum we need to take the max world size as all
@@ -640,6 +692,16 @@ class Manager:
                 self._participating_replica_rank = None
 
         if quorum_id != self._quorum_id:
+            self.quorum_logger.info(
+                "",
+                extra={
+                    "job_id": os.environ.get("JOB_ID", "unknown"),
+                    "replica_id": self._replica_id,
+                    "rank": self._group_rank,
+                    "quorum_id": quorum_id,
+                    "step": max_step,
+                },
+            )
             store_prefixed_addr = (
                 f"{store_address}/torchft/{quorum_id}/{self._group_rank}"
             )
@@ -647,13 +709,30 @@ class Manager:
             self._logger.info(f"reconfiguring for {quorum_id=} {store_prefixed_addr=}")
             # We use the replica rank and world as we want all replicas in the PG.
             try:
+                self._quorum_id = quorum_id
                 with torch.profiler.record_function("torchft::manager::_pg::configure"):
+                    # Reset GPU state for Flight Recorder
                     if torch.accelerator.is_available():
                         torch.accelerator.synchronize()
+
                     self._pg.configure(
-                        store_prefixed_addr, replica_rank, replica_world_size
+                        store_prefixed_addr,
+                        self._replica_id if self._replica_id is not None else "0",
+                        replica_rank,
+                        replica_world_size,
+                        quorum_id,
+                        self._group_rank,
+                        self._group_world_size,
+                        ranks_in_quorum,
                     )
-                self._quorum_id = quorum_id
+
+                    # We need to reset the trace after reconfiguring the PG because that
+                    # calls abort which may trigger a dump
+                    self._logger.info(
+                        f"resetting fr recording for quorum id {self._quorum_id}"
+                    )
+                    self._update_fr_path()
+                    torch._C._distributed_c10d._reset_fr_recording_nccl()  # pyre-ignore
             except Exception as e:
                 self._logger.exception(f"got exception in pg configure: {e}")
                 self.report_error(e)
@@ -727,6 +806,17 @@ class Manager:
                     if recovery_stream is not None
                     else None
                 )
+
+    def _update_fr_path(self) -> None:
+        """
+        Update the path that flight recorder will dump the traces to.
+        The format is
+        <TORCH_FR_DUMP_TEMP_FILE_ENV>_quorum_<quorum_id>/<global_rank>
+        """
+        if self._original_fr_dump_temp_file is not None:
+            folder = f"{self._original_fr_dump_temp_file}_quorum_{self._quorum_id}"
+            os.makedirs(folder, exist_ok=True)
+            os.environ[TORCH_FR_DUMP_TEMP_FILE_ENV] = f"{folder}/{self._global_rank}"
 
     def _apply_pending_state_dict(self) -> None:
         assert self._healing, "must be in healing state"
@@ -813,6 +903,18 @@ class Manager:
         )
         self._logger.info(
             f"should_commit={should_commit} enough_replicas={enough_replicas}, errored={self._errored}"
+        )
+
+        self.commits_logger.info(
+            "",
+            extra={
+                "job_id": os.environ.get("JOB_ID", "unknown"),
+                "replica_id": self._replica_id,
+                "rank": self._group_rank,
+                "quorum_id": self._quorum_id,
+                "step": self._step,
+                "commit_result": should_commit,
+            },
         )
 
         self._checkpoint_transport.disallow_checkpoint()
@@ -1211,14 +1313,19 @@ class _ManagedWork(dist._Work):
     def wait(self, timeout: Optional[timedelta] = None) -> bool:
         self._assert_same_stream()
 
-        with get_stream_context(self._stream):
-            self._work.wait()
-            self._set_future_callback()
+        try:
+            with get_stream_context(self._stream):
+                self._work.wait()
+                self._set_future_callback()
 
-        with get_stream_context(self._stream):
-            self._managed_fut_tail.wait()
+            with get_stream_context(self._stream):
+                self._managed_fut_tail.wait()
 
-        return True
+            return True
+        except Exception as e:
+            self._manager._logger.exception(f"got exception waiting for work {e}")
+            self._manager.report_error(e)
+            return False
 
     def block_current_stream(self, timeout: Optional[timedelta] = None) -> None:
         self._assert_same_stream()
