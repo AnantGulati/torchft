@@ -45,12 +45,11 @@ class FSDPTest(unittest.TestCase):
 
         pg: ProcessGroupGloo = Mock(spec=ProcessGroupGloo)
         device_mesh = init_device_mesh(
-            device_type="cuda",
+            device_type=torch.accelerator.current_accelerator().type,
             mesh_shape=(dp_shard, tp),
             mesh_dim_names=("dp_shard", "tp"),
         )
-        )
-        manager.num_participants.return_value = 1
+        Manager.num_participants.return_value = 1
         model = nn.Linear(128, 128).to(device)
         batch = torch.randn(4, 128).to(device)
 
