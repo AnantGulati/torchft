@@ -151,8 +151,8 @@ class DiLoCoTrainer:
         return outer_optimizers
 
     def setup_pg(self) -> FakeProcessGroupWrapper:
-        if self.device.type == torch.accelerator.current_accelerator.type:
-            return FakeProcessGroupWrapper(ProcessGroupBabyNCCL())
+        if self.device.type == torch.accelerator.current_accelerator().type:
+            return FakeProcessGroupWrapper(ProcessGroupBabyXCCL())
         else:
             return FakeProcessGroupWrapper(
                 ProcessGroupGloo(timeout=timedelta(seconds=10))

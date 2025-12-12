@@ -48,6 +48,9 @@ from torchft.process_group import (
     ProcessGroupWrapper,
 )
 from torchft.work import _DummyWork
+import torch.distributed as dist
+
+backend = dist.get_default_backend_for_device(torch.accelerator.current_accelerator().type)
 
 
 def dummy_init_pg() -> None:
@@ -320,7 +323,7 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
 def run_barrier_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """Test barrier collective operation."""
     opts = BarrierOptions()
-    if tensor.device.type == torch.accelerator.current_accelerator().type:
+    if tensor.device == torch.accelerator.current_accelerator():
         device_id = tensor.device.index
         opts.device_ids = [device_id]
     barrier_work = pg.barrier(opts)
@@ -542,15 +545,15 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.is_available(), "needs accelerator")
-    def test_xccl_apis(self) -> None:
+    def test_distributed_backend_apis(self) -> None:
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         device = torch.accelerator.current_accelerator().type
 
-    store_addr = f"localhost:{store.port}/prefix"
-    pg = ProcessGroupNCCL()
-    pg.configure(store_addr, "0", 0, 1)
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupXCCL()
+        pg.configure(store_addr, "0", 0, 1)
 
         self.assertEqual(pg.size(), 1)
 
@@ -569,10 +572,10 @@ class ProcessGroupTest(TestCase):
         torch.accelerator.synchronize()
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
-    #@skipUnless(
-    #    torch.accelerator.is_available() and torch.accelerator.xccl.version() >= (2, 25),
-    #    "needs XCCL >=2.25",
-    #)
+    @skipUnless(
+        torch.accelerator.is_available(), #and torch.accelerator.xccl.version() >= (2, 25),
+        "needs XCCL >=2.25",
+    )
     @patch("torchft.process_group.stream_timeout", autospec=True)
     @patch("torchft.process_group.context_timeout", autospec=True)
     def test_xccl_timeouts(
@@ -583,9 +586,9 @@ class ProcessGroupTest(TestCase):
         )
         device = torch.accelerator.current_accelerator().type
 
-    store_addr = f"localhost:{store.port}/prefix"
-    pg = ProcessGroupNCCL()
-    pg.configure(store_addr, "0", 0, 1)
+        store_addr = f"localhost:{store.port}/prefix"
+        pg = ProcessGroupXCCL()
+        pg.configure(store_addr, "0", 0, 1)
 
         t = torch.tensor([2], device=device)
         pg.allreduce([t], ReduceOp.SUM).wait()
@@ -691,7 +694,6 @@ class ProcessGroupTest(TestCase):
         # set to 1 if more than >=2 gpus
         device_id = 1 % torch.accelerator.device_count()
         torch.accelerator.set_device_index(device_id)
-
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
@@ -898,7 +900,7 @@ class MultiPgBaseTest(TestCase):
             if dev == torch.accelerator.current_accelerator().type:
                 torch.accelerator.set_device_index(rank)
                 # Use a separate stream to avoid deadlocks between threads.
-                torch.accelerator.set_stream(torch.accelerator.Stream())
+                torch.accelerator.set_stream(torch.cuda.Stream())
 
             fault_rank = self.WORLD_SIZE - 1
             test = _COLLECTIVE_TO_FUNC[collective]
@@ -1003,13 +1005,13 @@ class BabyNcclMultiPgTest(MultiPgBaseTest):
 
     # @parameterized.expand(_ALL_COLLECTIVES)
     # def test_collective_with_resiliency(self, collective: str) -> None:
-    #    self._run_with_resiliency(collective, device="cuda")
+    #    self._run_with_resiliency(collective, device=torch.accelerator.current_accelerator().type)
 
 
 @skipUnless(
     torch.accelerator.is_available()
     and torch.accelerator.device_count() >= 2,
-    #and torch.xpu.xccl.version() >= (2, 25),
+    #and torch.cuda.xccl.version() >= (2, 25),
     "needs 2 accelerator devices and XCCL >=2.25",
 )
 class NormalNcclMultiPgTest(MultiPgBaseTest):
