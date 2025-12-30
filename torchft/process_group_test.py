@@ -40,10 +40,13 @@ from torchft.process_group import (
     ErrorSwallowingProcessGroupWrapper,
     ManagedProcessGroup,
     ProcessGroup,
+    ProcessGroupAccelerator,
+    ProcessGroupBabyAccelerator,
     ProcessGroupBabyGloo,
     ProcessGroupBabyXCCL,
     ProcessGroupDummy,
     ProcessGroupGloo,
+    ProcessGroupNCCL,
     ProcessGroupXCCL,
     ProcessGroupWrapper,
 )
@@ -79,7 +82,7 @@ def _test_pg(
     ]
     tensor_list = [torch.empty_like(input_tensor)]
 
-    def check_tensors(arg: object) -> None:
+    def check_tensors(arg: Any) -> None:  # pyre-ignore[2]
         """Recursively check tensors for expected shape and dtype."""
         if isinstance(arg, torch.Tensor):
             assert arg.dtype == dtype, f"Output dtype mismatch: {arg.dtype} != {dtype}"
@@ -323,7 +326,7 @@ def run_broadcast_one_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) ->
 def run_barrier_test(pg: ProcessGroup, rank: int, tensor: torch.Tensor) -> None:
     """Test barrier collective operation."""
     opts = BarrierOptions()
-    if tensor.device == torch.accelerator.current_accelerator():
+    if tensor.device.type == torch.accelerator.current_accelerator().type:
         device_id = tensor.device.index
         opts.device_ids = [device_id]
     barrier_work = pg.barrier(opts)
@@ -545,14 +548,15 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.is_available(), "needs accelerator")
-    def test_distributed_backend_apis(self) -> None:
+    def test_accelerator_backend_apis(self) -> None:
+        """Test device-agnostic ProcessGroupAccelerator with reconfiguration."""
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         device = torch.accelerator.current_accelerator().type
 
         store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupXCCL()
+        pg = ProcessGroupAccelerator()
         pg.configure(store_addr, "0", 0, 1)
 
         self.assertEqual(pg.size(), 1)
@@ -573,21 +577,23 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(
-        torch.accelerator.is_available(), #and torch.accelerator.xccl.version() >= (2, 25),
-        "needs XCCL >=2.25",
+        torch.accelerator.is_available()
+        and (not torch.cuda.is_available() or torch.cuda.nccl.version() >= (2, 25)),
+        "needs accelerator and NCCL >= 2.25 if CUDA is available",
     )
     @patch("torchft.process_group.stream_timeout", autospec=True)
     @patch("torchft.process_group.context_timeout", autospec=True)
-    def test_xccl_timeouts(
+    def test_accelerator_timeouts(
         self, mock_context_timeout: Mock, mock_stream_timeout: Mock
     ) -> None:
+        """Test timeout handling in ProcessGroupAccelerator."""
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         device = torch.accelerator.current_accelerator().type
 
         store_addr = f"localhost:{store.port}/prefix"
-        pg = ProcessGroupXCCL()
+        pg = ProcessGroupAccelerator()
         pg.configure(store_addr, "0", 0, 1)
 
         t = torch.tensor([2], device=device)
@@ -604,17 +610,51 @@ class ProcessGroupTest(TestCase):
         torch.accelerator.is_available(),
         "needs accelerator",
     )
-    def test_xccl_init_timeout(self) -> None:
+    def test_accelerator_init_timeout(self) -> None:
+        """Test initialization timeout in ProcessGroupAccelerator."""
         store = TCPStore(
             host_name="localhost", port=0, is_master=True, wait_for_workers=False
         )
         store_addr = f"localhost:{store.port}/prefix"
         del store
 
-        pg = ProcessGroupXCCL(timeout=timedelta(seconds=0.01))
+        pg = ProcessGroupAccelerator(timeout=timedelta(seconds=0.01))
 
         with self.assertRaisesRegex(RuntimeError, "timed out after 10ms"):
             pg.configure(store_addr, "0", 0, 2)
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.accelerator.is_available(), "needs accelerator")
+    def test_accelerator_delegation_logic(self) -> None:
+        """Test that ProcessGroupAccelerator correctly delegates to NCCL/XCCL based on hardware."""
+        pg = ProcessGroupAccelerator()
+        
+        # Check that the correct backend is selected based on available hardware
+        if torch.cuda.is_available():
+            self.assertIsInstance(pg._pg, ProcessGroupNCCL)
+            self.assertIn("nccl", pg.getBackendName().lower())
+        elif torch.xpu.is_available():
+            self.assertIsInstance(pg._pg, ProcessGroupXCCL)
+            self.assertIn("xccl", pg.getBackendName().lower())
+        else:
+            self.fail("No accelerator available for testing")
+
+    # pyre-fixme[56]: Pyre was not able to infer the type of argument
+    @skipUnless(torch.accelerator.is_available(), "needs accelerator")
+    def test_baby_accelerator_delegation_logic(self) -> None:
+        """Test that ProcessGroupBabyAccelerator correctly delegates to BabyNCCL/BabyXCCL based on hardware."""
+        pg = ProcessGroupBabyAccelerator()
+        
+        # Check that the correct backend name is returned based on available hardware
+        backend_name = pg.getBackendName()
+        if torch.cuda.is_available():
+            self.assertEqual(backend_name, "torchft-baby-nccl")
+        elif torch.xpu.is_available():
+            self.assertEqual(backend_name, "torchft-baby-xccl")
+        else:
+            self.fail("No accelerator available for testing")
+        
+        pg.shutdown()
 
     def test_baby_gloo_timeout(self) -> None:
         store = TCPStore(
@@ -690,7 +730,8 @@ class ProcessGroupTest(TestCase):
 
     # pyre-fixme[56]: Pyre was not able to infer the type of argument
     @skipUnless(torch.accelerator.is_available(), "needs accelerator")
-    def test_baby_xccl_apis(self) -> None:
+    def test_baby_accelerator_apis(self) -> None:
+        """Test device-agnostic ProcessGroupBabyAccelerator with subprocess isolation."""
         # set to 1 if more than >=2 gpus
         device_id = 1 % torch.accelerator.device_count()
         torch.accelerator.set_device_index(device_id)
@@ -700,11 +741,12 @@ class ProcessGroupTest(TestCase):
 
         store_addr = f"localhost:{store.port}/prefix"
 
-        a = ProcessGroupBabyXCCL(timeout=timedelta(seconds=10))
+        a = ProcessGroupBabyAccelerator(timeout=timedelta(seconds=10))
         try:
             a.configure(store_addr, "0", 0, 1)
 
-            _test_pg(a, torch.randn((2, 3), device=torch.accelerator.current_accelerator().type))
+            device = torch.accelerator.current_accelerator().type
+            _test_pg(a, torch.randn((2, 3), device=device))
 
             torch.accelerator.synchronize()
 
@@ -712,6 +754,7 @@ class ProcessGroupTest(TestCase):
             gc.collect()
 
             self.assertEqual(a.num_active_work(), 0)
+
         finally:
             a.shutdown()
             torch.accelerator.synchronize()
@@ -740,10 +783,7 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.group_name, str(dist.get_pg_count() - 1))
 
-        self.assertIs(
-            _resolve_process_group(pg.group_name),  # pyre-ignore[6]: GroupName vs str
-            pg,
-        )
+        self.assertIs(_resolve_process_group(pg.group_name), pg)
 
         try:
             t = torch.zeros(10)
@@ -797,7 +837,7 @@ class MultiPgBaseTest(TestCase):
     a single ProcessGroup. Each test_* method will reuse the same PG.
 
     Subclasses can specify:
-    - BACKEND: the backend to use for the ProcessGroup ("gloo" or "xccl")
+    - BACKEND: the backend to use for the ProcessGroup ("gloo" or accelerator distributed backend)
     - WORLD_SIZE: how many ranks to simulate
     - Additional config for the PG, i.e. timeouts.
     """
@@ -843,17 +883,17 @@ class MultiPgBaseTest(TestCase):
         """
         Helper that creates a new ProcessGroup of the specified type.
 
-        XCCL groups aren't currently supported - we prefer to test
-        BabyXCCLGroups as they spin up their own subprocesses.
+        Accelerator groups aren't currently supported - we prefer to test
+        BabyAcceleratorGroups as they spin up their own subprocesses.
         """
         if backend == "gloo":
             return ProcessGroupGloo(timeout=timedelta(seconds=1))
         elif backend == "baby_gloo":
             return ProcessGroupBabyGloo(timeout=timedelta(seconds=10))
-        elif backend == "xccl":
-            return ProcessGroupXCCL(timeout=timedelta(seconds=10))
-        elif backend == "baby_xccl":
-            return ProcessGroupBabyXCCL(timeout=timedelta(seconds=10))
+        elif backend == "accelerator":
+            return ProcessGroupAccelerator(timeout=timedelta(seconds=10))
+        elif backend == "baby_accelerator":
+            return ProcessGroupBabyAccelerator(timeout=timedelta(seconds=10))
         elif backend == "dummy":
             return ProcessGroupDummy(0, 1)
         else:
@@ -903,7 +943,9 @@ class MultiPgBaseTest(TestCase):
             if dev == torch.accelerator.current_accelerator().type:
                 torch.accelerator.set_device_index(rank)
                 # Use a separate stream to avoid deadlocks between threads.
-                torch.accelerator.set_stream(torch.cuda.Stream())
+                # Create a stream using the device-specific module (e.g., torch.cuda.Stream() or torch.xpu.Stream())
+                device_module = getattr(torch, torch.accelerator.current_accelerator().type)
+                torch.accelerator.set_stream(device_module.Stream())
 
             fault_rank = self.WORLD_SIZE - 1
             test = _COLLECTIVE_TO_FUNC[collective]
@@ -996,10 +1038,14 @@ class BabyGlooMultiPgTest(MultiPgBaseTest):
 
 
 @skipUnless(
-    torch.accelerator.is_available() and torch.accelerator.device_count() >= 2, "needs 2 accelerator devices"
+    torch.accelerator.is_available() 
+    and torch.accelerator.device_count() >= 2
+    and (not torch.cuda.is_available() or torch.cuda.nccl.version() >= (2, 25)),
+    "needs 2 accelerator devices and NCCL >= 2.25 if CUDA is available"
 )
-class BabyNcclMultiPgTest(MultiPgBaseTest):
-    BACKEND = "baby_xccl"
+class BabyAcceleratorMultiPgTest(MultiPgBaseTest):
+    """Device-agnostic multi-process tests using ProcessGroupBabyAccelerator."""
+    BACKEND = "baby_accelerator"
     WORLD_SIZE = 2
 
     @parameterized.expand(_ALL_COLLECTIVES)
@@ -1013,12 +1059,16 @@ class BabyNcclMultiPgTest(MultiPgBaseTest):
 
 @skipUnless(
     torch.accelerator.is_available()
-    and torch.accelerator.device_count() >= 2,
-    #and torch.cuda.xccl.version() >= (2, 25),
-    "needs 2 accelerator devices and XCCL >=2.25",
+    and torch.accelerator.device_count() >= 2
+    and (not torch.cuda.is_available() or torch.cuda.nccl.version() >= (2, 25)),
+    "needs 2 accelerator devices and NCCL >= 2.25 if CUDA is available",
 )
-class NormalNcclMultiPgTest(MultiPgBaseTest):
-    BACKEND = "xccl"
+class AcceleratorMultiPgTest(MultiPgBaseTest):
+    """
+    Device-agnostic multi-process tests using ProcessGroupAccelerator.
+    This will automatically use NCCL for CUDA or XCCL for XPU.
+    """
+    BACKEND = "accelerator"
     WORLD_SIZE = 2
 
     @parameterized.expand(_ALL_COLLECTIVES)
