@@ -2116,3 +2116,73 @@ class ProcessGroupBabyXCCL(ProcessGroupBaby):
 
     def getBackendName(self) -> str:
         return "torchft-baby-xccl"
+
+
+class ProcessGroupAccelerator(ProcessGroupWrapper):
+    """
+    Device-agnostic process group that automatically detects the accelerator type
+    and delegates to the appropriate backend (NCCL for CUDA, XCCL for XPU).
+    
+    This allows writing device-agnostic code without explicitly choosing between
+    ProcessGroupNCCL and ProcessGroupXCCL.
+    
+    Args:
+        timeout: the timeout to use for operations.
+    """
+
+    def __init__(self, timeout: timedelta = timedelta(seconds=60.0)) -> None:
+        # Detect device type and create appropriate backend
+        device = torch.device(torch.accelerator.current_accelerator())
+        backend = dist.get_default_backend_for_device(device)
+        
+        if backend == "nccl":
+            pg = ProcessGroupNCCL(timeout=timeout)
+        elif backend == "xccl":
+            pg = ProcessGroupXCCL(timeout=timeout)
+        else:
+            raise RuntimeError(
+                f"ProcessGroupAccelerator does not support backend '{backend}' for device '{device}'"
+            )
+        super().__init__(timeout=timeout, pg=pg)
+
+    def getBackendName(self) -> str:
+        if self._pg is not None:
+            return self._pg.getBackendName()
+        return "torchft-accelerator"
+
+
+class ProcessGroupBabyAccelerator(ProcessGroupBaby):
+    """
+    Device-agnostic baby process group that automatically detects the accelerator type
+    and delegates to the appropriate backend (BabyNCCL for CUDA, BabyXCCL for XPU).
+    
+    This runs the underlying process group in a subprocess and allows writing
+    device-agnostic code without explicitly choosing between ProcessGroupBabyNCCL
+    and ProcessGroupBabyXCCL.
+    
+    Args:
+        timeout: the timeout to use for operations.
+    """
+
+    @classmethod
+    def _create_pg(cls, store: Store, rank: int, world_size: int) -> BaseProcessGroup:
+        """Create the appropriate backend based on available accelerator."""
+        device = torch.device(torch.accelerator.current_accelerator())
+        backend = dist.get_default_backend_for_device(device)
+        
+        if backend == "nccl":
+            return ProcessGroupBabyNCCL._create_pg(store, rank, world_size)
+        elif backend == "xccl":
+            return ProcessGroupBabyXCCL._create_pg(store, rank, world_size)
+        else:
+            raise RuntimeError(
+                f"ProcessGroupBabyAccelerator does not support backend '{backend}' for device '{device}'"
+            )
+
+    def getBackendName(self) -> str:
+        try:
+            device = torch.device(torch.accelerator.current_accelerator())
+            backend = dist.get_default_backend_for_device(device)
+            return f"torchft-baby-{backend}"
+        except Exception:
+            return "torchft-baby-accelerator"
