@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-import os
 import sys
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import timedelta
-from typing import Any, Callable, cast, Dict, List
+from typing import Any, Callable, Dict, List
 from unittest import skipIf, skipUnless, TestCase
 from unittest.mock import Mock, patch
 
@@ -25,7 +24,6 @@ from torch._C._distributed_c10d import (
     AllToAllOptions,
     BarrierOptions,
     BroadcastOptions,
-    ReduceOp,
     ReduceScatterOptions,
 )
 from torch.distributed import (
@@ -43,12 +41,11 @@ from torchft.process_group import (
     ProcessGroupAccelerator,
     ProcessGroupBabyAccelerator,
     ProcessGroupBabyGloo,
-    ProcessGroupBabyXCCL,
     ProcessGroupDummy,
     ProcessGroupGloo,
     ProcessGroupNCCL,
-    ProcessGroupXCCL,
     ProcessGroupWrapper,
+    ProcessGroupXCCL,
 )
 from torchft.work import _DummyWork
 import torch.distributed as dist
@@ -63,14 +60,19 @@ def dummy_init_pg() -> None:
         )
 
 
+_DEFAULT_TENSOR = torch.randn((2, 3), dtype=torch.float32)
+
+
 def _test_pg(
     pg: ProcessGroup,
-    example_tensor: torch.Tensor = torch.randn((2, 3), dtype=torch.float32),
-    skip: list[str] = [],
+    example_tensor: torch.Tensor = _DEFAULT_TENSOR,
+    skip: list[str] | None = None,
 ) -> Dict[str, dist._Work]:
     """
     Helper function to test a set of collective operations on a given process group.
     """
+    if skip is None:
+        skip = []
 
     shape: torch.Size = example_tensor.shape
     dtype: torch.dtype = example_tensor.dtype
@@ -502,7 +504,10 @@ _ALL_COLLECTIVES: List[str] = list(_COLLECTIVE_TO_FUNC.keys())
 class ProcessGroupTest(TestCase):
     @parameterized.expand(["cpu", torch.accelerator.current_accelerator().type])
     def test_gloo_apis(self, device: str) -> None:
-        if device == torch.accelerator.current_accelerator().type and not torch.accelerator.is_available():
+        if (
+            device == torch.accelerator.current_accelerator().type
+            and not torch.accelerator.is_available()
+        ):
             self.skipTest("accelerator is not available")
             return
 
@@ -628,7 +633,7 @@ class ProcessGroupTest(TestCase):
     def test_accelerator_delegation_logic(self) -> None:
         """Test that ProcessGroupAccelerator correctly delegates to NCCL/XCCL based on hardware."""
         pg = ProcessGroupAccelerator()
-        
+
         # Check that the correct backend is selected based on available hardware
         if torch.cuda.is_available():
             self.assertIsInstance(pg._pg, ProcessGroupNCCL)
@@ -644,7 +649,7 @@ class ProcessGroupTest(TestCase):
     def test_baby_accelerator_delegation_logic(self) -> None:
         """Test that ProcessGroupBabyAccelerator correctly delegates to BabyNCCL/BabyXCCL based on hardware."""
         pg = ProcessGroupBabyAccelerator()
-        
+
         # Check that the correct backend name is returned based on available hardware
         backend_name = pg.getBackendName()
         if torch.cuda.is_available():
@@ -653,7 +658,7 @@ class ProcessGroupTest(TestCase):
             self.assertEqual(backend_name, "torchft-baby-xccl")
         else:
             self.fail("No accelerator available for testing")
-        
+
         pg.shutdown()
 
     def test_baby_gloo_timeout(self) -> None:
@@ -826,8 +831,7 @@ class ProcessGroupTest(TestCase):
 
         self.assertEqual(pg.size(), 123)
 
-        works = _test_pg(pg)
-
+        _test_pg(pg)
         self.assertEqual(manager.allreduce.call_count, 2)
 
 
@@ -944,7 +948,9 @@ class MultiPgBaseTest(TestCase):
                 torch.accelerator.set_device_index(rank)
                 # Use a separate stream to avoid deadlocks between threads.
                 # Create a stream using the device-specific module (e.g., torch.cuda.Stream() or torch.xpu.Stream())
-                device_module = getattr(torch, torch.accelerator.current_accelerator().type)
+                device_module = getattr(
+                    torch, torch.accelerator.current_accelerator().type
+                )
                 torch.accelerator.set_stream(device_module.Stream())
 
             fault_rank = self.WORLD_SIZE - 1
@@ -1038,19 +1044,22 @@ class BabyGlooMultiPgTest(MultiPgBaseTest):
 
 
 @skipUnless(
-    torch.accelerator.is_available() 
+    torch.accelerator.is_available()
     and torch.accelerator.device_count() >= 2
     and (not torch.cuda.is_available() or torch.cuda.nccl.version() >= (2, 25)),
-    "needs 2 accelerator devices and NCCL >= 2.25 if CUDA is available"
+    "needs 2 accelerator devices and NCCL >= 2.25 if CUDA is available",
 )
 class BabyAcceleratorMultiPgTest(MultiPgBaseTest):
     """Device-agnostic multi-process tests using ProcessGroupBabyAccelerator."""
+
     BACKEND = "baby_accelerator"
     WORLD_SIZE = 2
 
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective(self, collective: str) -> None:
-        self._run_parallel(collective, device=torch.accelerator.current_accelerator().type)
+        self._run_parallel(
+            collective, device=torch.accelerator.current_accelerator().type
+        )
 
     # @parameterized.expand(_ALL_COLLECTIVES)
     # def test_collective_with_resiliency(self, collective: str) -> None:
@@ -1068,13 +1077,18 @@ class AcceleratorMultiPgTest(MultiPgBaseTest):
     Device-agnostic multi-process tests using ProcessGroupAccelerator.
     This will automatically use NCCL for CUDA or XCCL for XPU.
     """
+
     BACKEND = "accelerator"
     WORLD_SIZE = 2
 
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective(self, collective: str) -> None:
-        self._run_parallel(collective, device=torch.accelerator.current_accelerator().type)
+        self._run_parallel(
+            collective, device=torch.accelerator.current_accelerator().type
+        )
 
     @parameterized.expand(_ALL_COLLECTIVES)
     def test_collective_with_resiliency(self, collective: str) -> None:
-        self._run_with_resiliency(collective, device=torch.accelerator.current_accelerator().type)
+        self._run_with_resiliency(
+            collective, device=torch.accelerator.current_accelerator().type
+        )
