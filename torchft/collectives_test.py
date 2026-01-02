@@ -48,7 +48,7 @@ else:
         "2 accelerator devices are required for this test",
     )
     class QuantizedAllReduceTest(MultiPgBaseTest):
-        BACKEND = "xccl"
+        BACKEND = "accelerator"
         WORLD_SIZE = 2
 
         def _run_parallel_collectives(

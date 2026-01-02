@@ -42,7 +42,7 @@ from torchft.manager import Manager
 from torchft.optim import OptimizerWrapper
 from torchft.process_group import (
     FakeProcessGroupWrapper,
-    ProcessGroupBabyNCCL,
+    ProcessGroupBabyAccelerator,
     ProcessGroupGloo,
 )
 
@@ -616,7 +616,7 @@ def all_reduce_callback(
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
         if device.type == torch.accelerator.current_accelerator.type:
-            pg = ProcessGroupBabyNCCL()
+            pg = ProcessGroupBabyAccelerator()
         else:
             pg = ProcessGroupGloo()
         manager = Manager(

@@ -19,7 +19,7 @@ from torchft.manager import Manager
 from torchft.manager_integ_test import MyModel, Runner
 from torchft.process_group import (
     FakeProcessGroupWrapper,
-    ProcessGroupBabyNCCL,
+    ProcessGroupBabyAccelerator,
     ProcessGroupGloo,
 )
 
@@ -152,7 +152,7 @@ class DiLoCoTrainer:
 
     def setup_pg(self) -> FakeProcessGroupWrapper:
         if self.device.type == torch.accelerator.current_accelerator().type:
-            return FakeProcessGroupWrapper(ProcessGroupBabyXCCL())
+            return FakeProcessGroupWrapper(ProcessGroupBabyAccelerator())
         else:
             return FakeProcessGroupWrapper(
                 ProcessGroupGloo(timeout=timedelta(seconds=10))

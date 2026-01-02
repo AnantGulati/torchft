@@ -28,7 +28,6 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from torchft import (
     DistributedSampler,
     Manager,
-    ProcessGroupBabyNCCL,
     ProcessGroupGloo,
     ProcessGroupNCCL,
 )

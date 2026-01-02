@@ -36,7 +36,7 @@ from torchft.manager_integ_test import (
 )
 from torchft.process_group import (
     FakeProcessGroupWrapper,
-    ProcessGroupBabyNCCL,
+    ProcessGroupBabyAccelerator,
     ProcessGroupGloo,
 )
 
@@ -67,7 +67,7 @@ def local_sgd_train_loop(
         print(f"worker {runner.replica_id=} {rank=} {runner.world_size=} starting")
 
         if device.type == device:
-            pg = ProcessGroupBabyNCCL()
+            pg = ProcessGroupBabyAccelerator()
         else:
             pg = ProcessGroupGloo()
         manager = Manager(
