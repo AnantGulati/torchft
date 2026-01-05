@@ -113,7 +113,7 @@ else:
             reduce_op: ReduceOp,
             dtype: torch.dtype,
         ) -> None:
-            #here 
+            # here
             torch.accelerator.set_device_index(device)
             inp = (
                 torch.rand(

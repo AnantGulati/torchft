@@ -47,9 +47,14 @@ def main(argv: list[str]) -> None:
     store_addr: str = f"localhost:{store.port}"
 
     def run(rank: int) -> None:
-        torch.cuda.set_device(rank)
+        if torch.accelerator.is_available():
+            torch.accelerator.set_device_index(rank)
 
-        device = torch.device(DEVICE)
+        device = torch.device(
+            DEVICE
+            if DEVICE != "accelerator"
+            else torch.accelerator.current_accelerator().type
+        )
 
         with _timeit("init_pg"):
             pg = ProcessGroupBabyAccelerator(timeout=timeout)

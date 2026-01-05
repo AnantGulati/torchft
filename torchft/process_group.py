@@ -330,10 +330,8 @@ class ProcessGroup(BaseProcessGroup):
             return self
 
         devices = ["cpu"]
-        if torch.cuda.is_available():
-            devices.append("cuda")
-        elif torch.xpu.is_available():
-            devices.append("xpu")
+        if torch.accelerator.is_available():
+            devices.append(torch.accelerator.current_accelerator())
         dist.Backend.register_backend(group_name, create_pg, devices=devices)
 
         return group_name
@@ -495,10 +493,10 @@ class ProcessGroupWrapper(ProcessGroup):
             else:
                 backend = None
                 try:
-                    if torch.cuda.is_available():
-                        backend = pg._get_backend(torch.device("cuda"))
-                    elif torch.xpu.is_available():
-                        backend = pg._get_backend(torch.device("xpu"))
+                    if torch.accelerator.is_available():
+                        backend = pg._get_backend(
+                            torch.device(torch.accelerator.current_accelerator())
+                        )
                 except RuntimeError:
                     backend = None
                 if backend is not None and hasattr(backend, "abort"):
@@ -666,9 +664,11 @@ class ProcessGroupGloo(ProcessGroupWrapper):
         pg._register_backend(
             torch.device("cpu"), ProcessGroup.BackendType.GLOO, backend_class
         )
-        if torch.cuda.is_available():
+        if torch.accelerator.is_available():
             pg._register_backend(
-                torch.device("cuda"), ProcessGroup.BackendType.GLOO, backend_class
+                torch.device(torch.accelerator.current_accelerator()),
+                ProcessGroup.BackendType.GLOO,
+                backend_class,
             )
         return pg
 
@@ -733,10 +733,10 @@ class _WorkAcceleratorTimeout(Work):
             if self._work is not None and not self._work.wait():
                 return False
 
-            # Always use cuda stream for timeout to avoid ProcessGroupNCCL
+            # Always synchronize accelerator stream for timeout to avoid ProcessGroupNCCL
             # watchdog firing and crashing the process.
-            if timeout is not None:
-                torch.cuda.synchronize()
+            if timeout is not None and torch.accelerator.is_available():
+                torch.accelerator.synchronize()
 
             return True
 
@@ -805,7 +805,11 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         if timeout is None:
             timeout = timedelta(seconds=_DEFAULT_NCCL_TIMEOUT_SECONDS)
         super().__init__(timeout)
-        self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+        # Check if NCCL abort is supported (requires NCCL 2.25+)
+        try:
+            self._use_abort: bool = torch.cuda.nccl.version() >= (2, 25)
+        except (AttributeError, RuntimeError):
+            self._use_abort: bool = False
 
         self._errored: Optional[Exception] = None
 
@@ -875,8 +879,9 @@ class ProcessGroupNCCL(ProcessGroupWrapper):
         backend_class.eager_connect_single_device(
             torch.device(torch.accelerator.current_device_index())
         )
+        device = torch.device(torch.accelerator.current_accelerator())
         pg._register_backend(
-            torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
+            device, ProcessGroup.BackendType.NCCL, backend_class
         )
         return pg
 
@@ -1411,6 +1416,17 @@ def _is_any_xpu(obj: object) -> bool:
     return tree_any(lambda obj: isinstance(obj, torch.Tensor) and obj.is_xpu, obj)
 
 
+def _is_any_accelerator(obj: object) -> bool:
+    """
+    Returns true if any of the tensors in the object are on an accelerator device.
+
+    Supports lists, tuples, dicts, and tensors.
+    """
+    return tree_any(
+        lambda obj: isinstance(obj, torch.Tensor) and obj.device.type != "cpu", obj
+    )
+
+
 @dataclass
 class _OpMetadata:
     work: Work
@@ -1781,7 +1797,7 @@ class ProcessGroupBaby(ProcessGroup):
         pipe = self._pipe
         assert pipe is not None
 
-        is_accelerator = _is_any_cuda(args) or _is_any_xpu(args)
+        is_accelerator = _is_any_accelerator(args)
 
         stream_device = (
             torch.accelerator.current_stream().device if is_accelerator else None
@@ -2084,8 +2100,9 @@ class ProcessGroupBabyNCCL(ProcessGroupBaby):
         # pyre-fixme[16]: no attribute ProcessGroupNCCL
         backend_class = BaseProcessGroupNCCL(store, rank, world_size)
         backend_class._set_sequence_number_for_group()
+        device = torch.device(torch.accelerator.current_accelerator())
         pg._register_backend(
-            torch.device("cuda"), ProcessGroup.BackendType.NCCL, backend_class
+            device, ProcessGroup.BackendType.NCCL, backend_class
         )
         return pg
 

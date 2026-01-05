@@ -215,7 +215,9 @@ class Runner:
                     device_index = (
                         num_accelerators // self.num_replicas
                     ) * self.replica_id + rank
-                    device = torch.device(f"{torch.accelerator.current_accelerator.type}:{device_index}")
+                    device = torch.device(
+                        f"{torch.accelerator.current_accelerator.type}:{device_index}"
+                    )
                 else:
                     device = torch.device("cpu")
 

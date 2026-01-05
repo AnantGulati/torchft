@@ -43,7 +43,8 @@ from torchft.process_group import (
 logger: logging.Logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-device=torch.accelerator.current_accelerator()
+device = torch.accelerator.current_accelerator()
+
 
 def local_sgd_train_loop(
     rank: int,
@@ -449,7 +450,11 @@ class LocalSGDIntegTest(TestCase):
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_upscale(
-        self, use_accelerator: bool, n_fragments: int, fragment_sync_delay: int, alpha: float
+        self,
+        use_accelerator: bool,
+        n_fragments: int,
+        fragment_sync_delay: int,
+        alpha: float,
     ) -> None:
         # Skip the test if use_accelerator is True and there are not enough GPUs
         if use_accelerator and torch.accelerator.device_count() < 2:
@@ -525,7 +530,11 @@ class LocalSGDIntegTest(TestCase):
     @skipIf(sys.platform == "darwin", "not reliable on mac")
     @parameterized.expand(CONFIG)
     def test_streaming_diloco_commit_failure(
-        self, use_accelerator: bool, n_fragments: int, fragment_sync_delay: int, alpha: float
+        self,
+        use_accelerator: bool,
+        n_fragments: int,
+        fragment_sync_delay: int,
+        alpha: float,
     ) -> None:
         # Skip the test if use_accelerator is True and there are not enough GPUs
         if use_accelerator and torch.accelerator.device_count() < 2:
